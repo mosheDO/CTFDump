@@ -15,6 +15,9 @@ from urllib.parse import unquote
 
 __version__ = "0.3.0"
 
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 class BadUserNameOrPasswordException(Exception):
     pass
@@ -91,6 +94,7 @@ class CTF(object):
         self.session = Session()
         self.logger = logging.getLogger(__name__)
 
+
     def iter_challenges(self):
         raise NotImplementedError()
 
@@ -129,7 +133,7 @@ class CTFd(CTF):
         return 0
 
     def __get_nonce(self):
-        res = self.session.get(urljoin(self.url, "/login"))
+        res = self.session.get(urljoin(self.url, "/login"), headers=headers)
         html = BeautifulSoup(res.text, 'html.parser')
         return html.find("input", {'type': 'hidden', 'name': 'nonce'}).get("value")
 
@@ -235,6 +239,138 @@ class rCTF(CTF):
             )
 
 
+class itChallenge(Challenge):
+    def __init__(self, session, url, name, category="", description="", files=None, value=0, files_token=None):
+        super().__init__(session, url, name, category, description, files, value)
+        self.files_token = files_token
+
+    def download_file(self, url, file_path):
+        headers = self.session.headers.copy()  # Start with session headers (including 'Authorization')
+        if self.files_token:
+             # If filesToken exists, it might be needed. 
+             # However, since we don't know the exact mechanism (and filesToken is JWT),
+             # we can try adding it as a query param or a specific header if the download fails?
+             # Or maybe just overwrite Authorization if it's different.
+             # Given the name 'filesToken', it likely replaces the session token for file operations.
+             headers['Authorization'] = f"Bearer {self.files_token}"
+        
+        try:
+            res = self.session.get(url, stream=True, headers=headers)
+            res.raise_for_status()
+            with open(file_path, 'wb') as f:
+                for chunk in res.iter_content(chunk_size=1024):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                f.flush()
+        except Exception as ex:
+            print(f"Failed to download {url}: {ex}")
+
+
+class itCTF(CTF):
+    def __init__(self, url):
+        super().__init__(url)
+        self.token = None
+        self.files_token = None
+
+    def login(self, username, password):
+        headers = {
+            'Content-type': 'application/json',
+            'Accept': 'application/json'
+        }
+        try:
+            res = self.session.post(
+                url=urljoin(self.url, "/api/login"),
+                headers=headers,
+                json={'email': username, 'password': password}
+            )
+            
+            if res.ok:
+                data = res.json()
+                self.token = data.get('token')
+                self.files_token = data.get('filesToken')
+                
+                # Set default authorization for API requests
+                if self.token:
+                    # Clear existing auth headers just in case
+                    self.session.headers.pop('Authorization', None)
+                    # Add Bearer token
+                    self.session.headers.update({
+                        'Authorization': f"Bearer {self.token}"
+                    })
+                return True
+        except Exception as e:
+            self.logger.error(f"Login failed: {e}")
+        return False
+
+    def __iter_challenges(self):
+        # Fetch structure
+        try:
+            res = self.session.get(urljoin(self.url, "/api/challenges?noFreeze=false"))
+            if not res.ok:
+                print(f"Failed to fetch challenges list: {res.status_code}")
+                return
+
+            data = res.json()
+            events = data.get('events', [])
+            for event in events:
+                sections = event.get('sections', [])
+                for section in sections:
+                    challenges = section.get('challenges', [])
+                    for challenge_meta in challenges:
+                        challenge_id = challenge_meta.get('id')
+                        try:
+                            # Fetch full challenge details
+                            chal_res = self.session.get(urljoin(self.url, f"/api/challenges/{challenge_id}"))
+                            if chal_res.ok:
+                                yield chal_res.json()
+                        except Exception as e:
+                            print(f"Error fetching challenge details for {challenge_id}: {e}")
+        except Exception as e:
+            print(f"Error iterating challenges: {e}")
+
+    def iter_challenges(self):
+        for challenge in self.__iter_challenges():
+            file_urls = []
+            files = challenge.get('files') or []
+            if files:
+                for f in files:
+                    # Handle dict format: {"url": "...", "name": "..."}
+                    if isinstance(f, dict):
+                        f_url = f.get('url')
+                        if f_url:
+                            if not f_url.startswith('http'):
+                                f_url = urljoin(self.url, f_url)
+                            file_urls.append(f_url)
+                    elif isinstance(f, str):
+                        # Handle string format if any
+                        f_url = f
+                        if not f_url.startswith('http'):
+                            f_url = urljoin(self.url, f_url)
+                        file_urls.append(f_url)
+            
+            category = 'Unknown'
+            start_cat = challenge.get('tags')
+            if start_cat and len(start_cat) > 0:
+                category = start_cat[0]
+            
+            yield itChallenge(
+                session=self.session, 
+                url=self.url,
+                name=challenge.get('title', 'Untitled'), 
+                category=category,
+                description=challenge.get('description', ''), 
+                value=challenge.get('currentScore', 0),
+                files=file_urls,
+                files_token=self.files_token
+            )
+
+
+class CTFsd(CTFd):
+    def __init__(self, url):
+        super().__init__(url)
+
+
 def get_credentials(username=None, password=None):
     username = username or os.environ.get('CTF_USERNAME', input('User/Email: '))
     password = password or os.environ.get('CTF_PASSWORD', getpass('Password: ', stream=False))
@@ -244,7 +380,9 @@ def get_credentials(username=None, password=None):
 
 CTFs = CaseInsensitiveDict(data={
     "CTFd": CTFd,
-    "rCTF": rCTF
+    "rCTF": rCTF,
+    "itCTF": itCTF,
+    "CTFsd": CTFsd
 })
 
 
