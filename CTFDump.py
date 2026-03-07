@@ -56,14 +56,24 @@ class Challenge(object):
     def escape_filename(filename):
         return re.sub(r"[^\w\s\-.()]", "", filename.strip())
 
+    def print_progress(self, current, total):
+        percent = (current / total) * 100
+        sys.stdout.write(f"\rDownloading... {percent:.2f}%")
+        sys.stdout.flush()
+
     def download_file(self, url, file_path):
         try:
-            res = self.session.get(url, stream=True)
+            res = self.session.get(url, stream=True, timeout=10)
+            total_size = int(res.headers.get('Content-Length', 0))
+            downloaded_size = 0
             with open(file_path, 'wb') as f:
                 for chunk in res.iter_content(chunk_size=1024):
                     if not chunk:
                         continue
                     f.write(chunk)
+                    downloaded_size += len(chunk)
+                    self.print_progress(downloaded_size, total_size)
+                print()
                 f.flush()
         except Exception as ex:
             print(ex)
