@@ -12,6 +12,7 @@ from requests.utils import CaseInsensitiveDict
 from urllib.parse import urlparse, urljoin
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from urllib.parse import unquote
+from tqdm import tqdm
 
 __version__ = "0.3.0"
 
@@ -56,27 +57,21 @@ class Challenge(object):
     def escape_filename(filename):
         return re.sub(r"[^\w\s\-.()]", "", filename.strip())
 
-    def print_progress(self, current, total):
-        percent = (current / total) * 100
-        sys.stdout.write(f"\rDownloading... {percent:.2f}%")
-        sys.stdout.flush()
-
     def download_file(self, url, file_path):
         try:
             res = self.session.get(url, stream=True, timeout=10)
             total_size = int(res.headers.get('Content-Length', 0))
-            downloaded_size = 0
             with open(file_path, 'wb') as f:
-                for chunk in res.iter_content(chunk_size=1024):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-                    self.print_progress(downloaded_size, total_size)
-                print()
+                with tqdm(total=total_size, unit='B', unit_scale=True,
+                          desc=path.basename(file_path), colour='green') as bar:
+                    for chunk in res.iter_content(chunk_size=1024):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        bar.update(len(chunk))
                 f.flush()
         except Exception as ex:
-            print(ex)
+            print(f"\033[31mFailed to download {url}: {ex}\033[0m")
 
     def dump(self):
         # Create challenge directory if not exist
@@ -429,14 +424,15 @@ def main(args=None):
     if sys_args['ctf_platform'] == 'rCTF':
         if not ctf.login(sys_args['token']):
             raise BadTokenException()
-    elif not sys_args['no_login'] or not os.environ.get('CTF_NO_LOGIN'):
+    elif not sys_args['no_login']:
         if not ctf.login(*get_credentials(sys_args['username'], sys_args['password'])):
             raise BadUserNameOrPasswordException()
 
-    for challenge in ctf.iter_challenges():
+    challenges = list(ctf.iter_challenges())
+    for challenge in tqdm(challenges, desc="Challenges", colour='cyan', unit='challenge'):
         challenge.dump()
 
-    if not sys_args['no_login'] or not os.environ.get('CTF_NO_LOGIN'):
+    if not sys_args['no_login']:
         ctf.logout()
 
 
